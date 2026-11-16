@@ -1,0 +1,14 @@
+{
+  "name": "download-speed-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Консольный замер скорости скачивания: тестовое задание на Node.js",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js"
+  }
+}

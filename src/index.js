@@ -25,11 +25,16 @@ function describeError(error, phase) {
     UND_ERR_HEADERS_TIMEOUT: "Timed out waiting for response headers.",
     UND_ERR_BODY_TIMEOUT: "Timed out waiting for response body data.",
     UND_ERR_SOCKET: "Connection closed before the download completed.",
-    UND_ERR_RES_CONTENT_LENGTH_MISMATCH: "Response body is incomplete: size does not match Content-Length.",
-    UND_ERR_HEADERS_OVERFLOW: "Server returned response headers that are too large.",
-    ERR_SSL_WRONG_VERSION_NUMBER: "TLS connection failed: server does not support the expected HTTPS protocol.",
-    DEPTH_ZERO_SELF_SIGNED_CERT: "TLS certificate is self-signed and is not trusted.",
-    SELF_SIGNED_CERT_IN_CHAIN: "TLS certificate chain contains an untrusted self-signed certificate.",
+    UND_ERR_RES_CONTENT_LENGTH_MISMATCH:
+      "Response body is incomplete: size does not match Content-Length.",
+    UND_ERR_HEADERS_OVERFLOW:
+      "Server returned response headers that are too large.",
+    ERR_SSL_WRONG_VERSION_NUMBER:
+      "TLS connection failed: server does not support the expected HTTPS protocol.",
+    DEPTH_ZERO_SELF_SIGNED_CERT:
+      "TLS certificate is self-signed and is not trusted.",
+    SELF_SIGNED_CERT_IN_CHAIN:
+      "TLS certificate chain contains an untrusted self-signed certificate.",
     UNABLE_TO_VERIFY_LEAF_SIGNATURE: "TLS certificate could not be verified.",
     UNABLE_TO_GET_ISSUER_CERT_LOCALLY: "TLS certificate issuer is not trusted.",
   };
@@ -55,16 +60,21 @@ function describeError(error, phase) {
 async function main() {
   const args = process.argv.slice(2);
   if (args.length !== 1 || !args[0].trim()) {
-    console.error("Provide exactly one URL. Usage: npm start -- \"https://host/file\"");
+    console.error(
+      'Provide exactly one URL. Usage: npm start -- "https://host/file"',
+    );
     process.exitCode = 1;
     return;
   }
 
   let url;
+
   try {
     url = new URL(args[0]);
   } catch {
-    console.error("Invalid URL. Provide a complete address starting with http:// or https://.");
+    console.error(
+      "Invalid URL. Provide a complete address starting with http:// or https://.",
+    );
     process.exitCode = 1;
     return;
   }
@@ -78,35 +88,52 @@ async function main() {
     process.exitCode = 1;
     return;
   }
+  let totalTime = 0;
+  let totalByte = 0;
+  for (let i = 0; i < 10; i++) {
+    const controller = new AbortController();
+    const signal = AbortSignal.any([
+      controller.signal,
+      AbortSignal.timeout(TIMEOUT_MS),
+    ]);
+    const interrupt = () => controller.abort();
+    process.once("SIGINT", interrupt);
+    let phase = "request";
 
-  const controller = new AbortController();
-  const signal = AbortSignal.any([
-    controller.signal,
-    AbortSignal.timeout(TIMEOUT_MS),
-  ]);
-  const interrupt = () => controller.abort();
-  process.once("SIGINT", interrupt);
-  let phase = "request";
+    try {
+      let startedAt = performance.now();
+      let response;
 
-  try {
-    const response = await fetch(url, { signal });
-    if (!response.ok) {
-      console.error(`HTTP request failed: ${response.status} ${response.statusText}`.trim());
-      process.exitCode = 1;
-      // Не читаем страницу HTTP-ошибки и освобождаем её соединение.
-      controller.abort();
+      response = await fetch(url, { signal });
+      if (!response.ok) {
+        console.error(
+          `HTTP request failed: ${response.status} ${response.statusText}`.trim(),
+        );
+        process.exitCode = 1;
+        controller.abort();
+        return;
+      }
+
+      phase = "body";
+      const body = await response.arrayBuffer();
+      let performanceTime = (performance.now() - startedAt) / 1000;
+
+      totalTime += performanceTime;
+      totalByte += body.byteLength;
+    } catch (error) {
+      console.error(
+        describeError(signal.aborted ? signal.reason : error, phase),
+      );
+      process.exitCode = controller.signal.aborted ? 130 : 1;
       return;
+    } finally {
+      process.removeListener("SIGINT", interrupt);
     }
-
-    phase = "body";
-    const body = await response.arrayBuffer();
-    console.log("bytes length:", body.byteLength);
-  } catch (error) {
-    console.error(describeError(signal.aborted ? signal.reason : error, phase));
-    process.exitCode = controller.signal.aborted ? 130 : 1;
-  } finally {
-    process.removeListener("SIGINT", interrupt);
   }
+
+  console.log("average time:", (totalTime / 10).toFixed(3), "s");
+  console.log("bytes in overall:", totalByte);
+  console.log("spped:", (totalByte * 8) / totalTime / 1000000);
 }
 
 await main();

@@ -133,7 +133,7 @@ async function main() {
 
   console.log("average time:", (totalTime / 10).toFixed(3), "s");
   console.log("bytes in overall:", totalByte);
-  console.log("spped:", (totalByte * 8) / totalTime / 1000000);
+  console.log("speed:", (totalByte * 8) / totalTime / 1000000, "Mbps");
 }
 
 await main();

@@ -8,6 +8,22 @@ const exec = promisify(execFile);
 const script = new URL("../src/index.js", import.meta.url).pathname;
 let server;
 let baseUrl;
+let sequenceStats;
+let lateFailureRequests = 0;
+
+function readMetrics(stdout) {
+  const average = stdout.match(/^average time: ([\d.]+) s$/m);
+  const bytes = stdout.match(/^bytes in overall: (\d+)$/m);
+  const speed = stdout.match(/^speed: ([\d.eE+-]+) Mbps$/m);
+  assert.ok(average && bytes && speed, `Missing measurement or units: ${stdout}`);
+  const result = {
+    average: Number(average[1]),
+    bytes: Number(bytes[1]),
+    speed: Number(speed[1]),
+  };
+  assert.ok(Object.values(result).every(Number.isFinite));
+  return result;
+}
 
 async function run(args = [], preload = "") {
   const flags = preload
@@ -39,6 +55,22 @@ before(async () => {
       setTimeout(() => res.end(Buffer.alloc(333)), 20);
     } else if (req.url === "/empty") {
       res.writeHead(204).end();
+    } else if (req.url === "/sequence") {
+      const stats = sequenceStats;
+      const size = 100 + ++stats.requests;
+      stats.active++;
+      stats.maxActive = Math.max(stats.maxActive, stats.active);
+      res.once("finish", () => {
+        stats.active--;
+        stats.completed++;
+      });
+      // Заголовки приходят сразу, но тело остаётся незавершённым ещё 40 мс.
+      res.write(Buffer.alloc(1));
+      setTimeout(() => res.end(Buffer.alloc(size - 1)), 40);
+    } else if (req.url === "/late-failure") {
+      lateFailureRequests++;
+      if (lateFailureRequests === 7) res.writeHead(503).end("Unavailable");
+      else res.end(Buffer.alloc(100));
     } else if (req.url.startsWith("/status/")) {
       res.writeHead(Number(req.url.split("/")[2]));
       res.write("Error body intentionally stays open");
@@ -68,17 +100,57 @@ after(async () => {
   await new Promise(resolve => server.close(resolve));
 });
 
-test("reads all chunks before reporting the byte count", async () => {
+test("reads all chunks of ten responses before reporting totals", async () => {
   const result = await run([`${baseUrl}/ok`]);
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "bytes length: 456");
+  const metrics = readMetrics(result.stdout);
+  assert.equal(metrics.bytes, 4560);
+  assert.ok(metrics.average >= 0.015, "Response body delay must be included in elapsed time");
+  assert.ok(metrics.speed > 0);
   assert.equal(result.stderr, "");
 });
 
 test("accepts an empty successful response", async () => {
   const result = await run([`${baseUrl}/empty`]);
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "bytes length: 0");
+  const metrics = readMetrics(result.stdout);
+  assert.equal(metrics.bytes, 0);
+  assert.equal(metrics.speed, 0);
+});
+
+test("makes exactly ten sequential requests to the same URL", async () => {
+  sequenceStats = { requests: 0, active: 0, maxActive: 0, completed: 0 };
+  const result = await run([`${baseUrl}/sequence`]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(readMetrics(result.stdout).bytes, 1055);
+  assert.deepEqual(sequenceStats, { requests: 10, active: 0, maxActive: 1, completed: 10 });
+});
+
+test("calculates average time and Mbps from totals using known durations", async () => {
+  const preload = `
+    let calls = 0;
+    let now = 0;
+    let requests = 0;
+    performance.now = () => {
+      const index = calls++;
+      if (index % 2 === 1) now += ((index + 1) / 2) * 100;
+      return now;
+    };
+    globalThis.fetch = async () => {
+      const byteLength = ++requests * 100000;
+      return { ok: true, arrayBuffer: async () => ({ byteLength }) };
+    };
+  `;
+  const result = await run([`${baseUrl}/ok`], preload);
+  assert.equal(result.code, 0, result.stderr);
+  // Длительности 0.1..1.0 с, объёмы 100000..1000000 байт.
+  assert.deepEqual(readMetrics(result.stdout), { average: 0.55, bytes: 5500000, speed: 8 });
+});
+
+test("stops on the seventh failure without printing a partial measurement", async () => {
+  lateFailureRequests = 0;
+  expectFailure(await run([`${baseUrl}/late-failure`]), /HTTP request failed: 503/);
+  assert.equal(lateFailureRequests, 7);
 });
 
 for (const args of [[], [""], ["   "], ["http://host", "extra"]]) {
@@ -124,6 +196,13 @@ const shortTimeout = `
   const original = AbortSignal.timeout.bind(AbortSignal);
   AbortSignal.timeout = () => original(200);
 `;
+test("creates a fresh deadline for every request", async () => {
+  sequenceStats = { requests: 0, active: 0, maxActive: 0, completed: 0 };
+  const result = await run([`${baseUrl}/sequence`], shortTimeout);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(readMetrics(result.stdout).bytes, 1055);
+  assert.equal(sequenceStats.completed, 10);
+});
 for (const path of ["/slow-headers", "/slow-body"]) {
   test(`timeout covers both connection/headers and body: ${path}`, async () => {
     expectFailure(await run([`${baseUrl}${path}`], shortTimeout), /Request timed out/);
